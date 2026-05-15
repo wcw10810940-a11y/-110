@@ -84,39 +84,46 @@ const backspaceCommand = (state, dispatch) => {
 const Editor = forwardRef(({ onSceneContextChange }, ref) => {
   const editorDOMRef = useRef(null)
   const viewRef = useRef(null)
+  const menuScrollRef = useRef(null)
+  
   const tagsDataRef = useRef({ locs: [], times: [], tags: [] })
   const [menuData, setMenuData] = useState({ active: false, coords: null, query: '', menuType: null, from: 0, to: 0 })
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const pmMenuRef = useRef({ active: false, query: '', menuType: null, from: 0, to: 0, setSelectedIndex: null, insertTag: null, closeMenu: null })
+  
+  // 🌟 核心修復：這座橋樑確保編輯器按鍵事件永遠能拿到最新的選項資料
+  const menuStateRef = useRef({ options: [], selectedIndex: 0 })
+  const pmMenuRef = useRef({ active: false, query: '', menuType: null, from: 0, to: 0 })
 
   const options = useMemo(() => {
      if (!menuData.active) return []
      let all = []
      if (menuData.menuType === 'inOut') all = ['內.', '外.', '內/外.'].map(t => ({ text: t, type: 'inOut', label: '內/外' }))
      else if (menuData.menuType === 'loc') all = tagsDataRef.current.locs.map(t => ({ text: t, type: 'loc', label: '地點' }))
-     else if (menuData.menuType === 'time') all = ['日', '夜', '晨', '昏', ...tagsDataRef.current.times].map(t => ({ text: t, type: 'time', label: '時間' }))
+     else if (menuData.menuType === 'time') all = ['日', '夜', '晨', '昏', ...tagsDataRef.current.times.filter(t => !['日','夜','晨','昏'].includes(t))].map(t => ({ text: t, type: 'time', label: '時間' }))
      else if (menuData.menuType === 'tag') all = tagsDataRef.current.tags.map(t => ({ text: t, type: 'tag', label: '標記' }))
+     
      let filtered = all.filter(o => o.text.toLowerCase().includes(menuData.query.toLowerCase()))
+     filtered = filtered.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i)
      if (menuData.query.trim().length > 0) filtered.push({ text: menuData.query, type: 'new', label: '自訂' })
-     return filtered.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i)
+     return filtered
   }, [menuData.query, menuData.active, menuData.menuType])
 
+  // 🌟 同步更新橋樑內的資料
   useEffect(() => {
-     pmMenuRef.current.setSelectedIndex = setSelectedIndex
-     pmMenuRef.current.closeMenu = () => setMenuData(prev => ({ ...prev, active: false }))
-     pmMenuRef.current.insertTag = () => {
-        const sel = options[pmMenuRef.current.selectedIndex]
-        if (sel && viewRef.current) {
-           const view = viewRef.current
-           let txt = sel.text;
-           if (pmMenuRef.current.menuType === 'inOut' || pmMenuRef.current.menuType === 'loc') txt += ' ';
-           if (pmMenuRef.current.menuType === 'time') txt = `- ${txt} `;
-           if (pmMenuRef.current.menuType === 'tag') txt = `(${txt}) `;
-           view.dispatch(view.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, view.state.schema.text(txt)))
-           setMenuData(prev => ({ ...prev, active: false }))
-        }
-     }
+     menuStateRef.current.options = options
+     setSelectedIndex(prev => {
+        const next = Math.min(prev, Math.max(0, options.length - 1))
+        menuStateRef.current.selectedIndex = next
+        return next
+     })
   }, [options])
+
+  useEffect(() => {
+    if (menuData.active && menuScrollRef.current) {
+      const selectedEl = menuScrollRef.current.querySelector('.selected')
+      if (selectedEl) selectedEl.scrollIntoView({ block: 'nearest' })
+    }
+  }, [selectedIndex, menuData.active])
 
   useImperativeHandle(ref, () => ({
     scrollToPos: (pos) => {
@@ -157,10 +164,48 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
           props: {
             handleKeyDown(view, event) {
               if (!pmMenuRef.current.active) return false
-              if (event.key === 'ArrowDown') { event.preventDefault(); setSelectedIndex(i => Math.min(i + 1, options.length - 1)); return true }
-              if (event.key === 'ArrowUp') { event.preventDefault(); setSelectedIndex(i => Math.max(i - 1, 0)); return true }
-              if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); pmMenuRef.current.insertTag(); return true }
-              if (event.key === 'Escape') { event.preventDefault(); pmMenuRef.current.closeMenu(); return true }
+              
+              if (event.key === 'ArrowDown') { 
+                  event.preventDefault()
+                  setSelectedIndex(prev => {
+                      const next = Math.min(prev + 1, menuStateRef.current.options.length - 1)
+                      menuStateRef.current.selectedIndex = next // 同步寫入最新狀態
+                      return next
+                  })
+                  return true 
+              }
+              if (event.key === 'ArrowUp') { 
+                  event.preventDefault()
+                  setSelectedIndex(prev => {
+                      const next = Math.max(prev - 1, 0)
+                      menuStateRef.current.selectedIndex = next
+                      return next
+                  })
+                  return true 
+              }
+              if (event.key === 'Enter' || event.key === 'Tab') { 
+                  event.preventDefault()
+                  // 🌟 從橋樑拿取最新選中的項目
+                  const { options, selectedIndex } = menuStateRef.current
+                  const sel = options[selectedIndex]
+                  if (sel) {
+                      let txt = sel.text
+                      if (pmMenuRef.current.menuType === 'inOut' || pmMenuRef.current.menuType === 'loc') txt += ' '
+                      if (pmMenuRef.current.menuType === 'time') txt = `- ${txt} `
+                      if (pmMenuRef.current.menuType === 'tag') txt = `(${txt}) `
+                      
+                      view.dispatch(view.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, view.state.schema.text(txt)))
+                      setMenuData(p => ({ ...p, active: false }))
+                      pmMenuRef.current.active = false
+                  }
+                  return true 
+              }
+              if (event.key === 'Escape') { 
+                  event.preventDefault()
+                  setMenuData(p => ({ ...p, active: false }))
+                  pmMenuRef.current.active = false
+                  return true 
+              }
               return false
             }
           },
@@ -168,19 +213,28 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
             return {
               update(view) {
                 const { $from, empty } = view.state.selection
-                if (!empty || $from.parent.type.name !== 'scene_heading') { setMenuData(p => ({ ...p, active: false })); pmMenuRef.current.active = false; return }
+                if (!empty || $from.parent.type.name !== 'scene_heading') { 
+                    setMenuData(p => ({ ...p, active: false }))
+                    pmMenuRef.current.active = false
+                    return 
+                }
                 const textBefore = $from.parent.textBetween(0, $from.parentOffset)
                 let q = null, mt = null, ml = 0
                 const mIn = textBefore.match(/\/([^\s/]*)$/), mLoc = textBefore.match(/#([^\s#]*)$/), mTim = textBefore.match(/-([^\s-]*)$/), mTag = textBefore.match(/\(([^\s()]*)$/)
+                
                 if (mIn) { q = mIn[1]; mt = 'inOut'; ml = mIn[0].length }
                 else if (mLoc) { q = mLoc[1]; mt = 'loc'; ml = mLoc[0].length }
                 else if (mTim) { q = mTim[1]; mt = 'time'; ml = mTim[0].length }
                 else if (mTag) { q = mTag[1]; mt = 'tag'; ml = mTag[0].length }
+                
                 if (mt) {
                   const coords = view.coordsAtPos($from.pos)
                   pmMenuRef.current = { ...pmMenuRef.current, active: true, query: q, menuType: mt, from: $from.pos - ml, to: $from.pos }
                   setMenuData({ active: true, query: q, menuType: mt, coords: { top: coords.bottom + 4, left: coords.left } })
-                } else { setMenuData(p => ({ ...p, active: false })); pmMenuRef.current.active = false }
+                } else { 
+                  setMenuData(p => ({ ...p, active: false }))
+                  pmMenuRef.current.active = false 
+                }
               }
             }
           }
@@ -204,16 +258,31 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
         keymap(baseKeymap) 
       ] 
     })
+    
     viewRef.current = new EditorView(editorDOMRef.current, {
       state, dispatchTransaction(tr) {
         const next = viewRef.current.state.apply(tr); viewRef.current.updateState(next)
         
-        // 🌟 效能修復點：只有在「文件內容真正改變」時，才重新掃描大綱與更新全文，游標單純移動時絕對不執行！
         if (tr.docChanged) {
           const h = []; const locs = new Set(), times = new Set(), tags = new Set()
-          let i = 1; next.doc.descendants((n, p) => { if (n.type.name === 'scene_heading') { const ps = parseSceneText(n.textContent); if (ps.loc) locs.add(ps.loc); if (ps.time) times.add(ps.time); if (ps.tags) tags.add(ps.tags); h.push({ id: `scene-${i}`, ...ps, num: `S${i++}`, pos: p }) } })
+          let i = 1; next.doc.descendants((n, p) => { 
+            if (n.type.name === 'scene_heading') { 
+              const ps = parseSceneText(n.textContent); 
+              if (ps.loc) locs.add(ps.loc); 
+              if (ps.time) times.add(ps.time); 
+              if (ps.tags) tags.add(ps.tags); 
+              h.push({ id: `scene-${i}`, ...ps, num: `S${i++}`, pos: p }) 
+            } 
+          })
           tagsDataRef.current = { locs: Array.from(locs), times: Array.from(times), tags: Array.from(tags) }
-          let ftext = ""; next.doc.descendants(n => { if (n.isBlock && n.textContent) { if (n.type.name === 'scene_heading' || n.type.name === 'character') ftext += `\n\n${n.textContent.toUpperCase()}\n`; else if (n.type.name === 'dialogue') ftext += `${n.textContent}\n`; else ftext += `\n${n.textContent}\n` } })
+          
+          let ftext = ""; next.doc.descendants(n => { 
+            if (n.isBlock && n.textContent) { 
+              if (n.type.name === 'scene_heading' || n.type.name === 'character') ftext += `\n\n${n.textContent.toUpperCase()}\n`; 
+              else if (n.type.name === 'dialogue') ftext += `${n.textContent}\n`; 
+              else ftext += `\n${n.textContent}\n` 
+            } 
+          })
           onSceneContextChange({ headings: h, ftext: ftext.trim(), pages: Math.max(1, Math.ceil(editorDOMRef.current.clientHeight / 1131)) })
           localStorage.setItem('script-studio-data', JSON.stringify(next.doc.toJSON()))
         }
@@ -226,9 +295,20 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
     <>
       <div ref={editorDOMRef} className="prosemirror-editor-container" />
       {menuData.active && options.length > 0 && (
-        <div className="tag-autocomplete-menu" style={{ top: menuData.coords.top, left: menuData.coords.left }}>
+        <div ref={menuScrollRef} className="tag-autocomplete-menu" style={{ top: menuData.coords.top, left: menuData.coords.left }}>
           {options.map((opt, i) => (
-             <div key={i} className={`tag-option ${i === selectedIndex ? 'selected' : ''}`} onMouseDown={(e) => { e.preventDefault(); pmMenuRef.current.setSelectedIndex(i); setTimeout(() => pmMenuRef.current.insertTag(), 0) }}>
+             <div key={i} className={`tag-option ${i === selectedIndex ? 'selected' : ''}`} onMouseDown={(e) => { 
+                 e.preventDefault(); 
+                 // 🌟 滑鼠點擊時的防呆機制：確保立刻拿到正確的項目
+                 let txt = opt.text
+                 if (menuData.menuType === 'inOut' || menuData.menuType === 'loc') txt += ' '
+                 if (menuData.menuType === 'time') txt = `- ${txt} `
+                 if (menuData.menuType === 'tag') txt = `(${txt}) `
+                 viewRef.current.dispatch(viewRef.current.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, viewRef.current.state.schema.text(txt)))
+                 setMenuData(p => ({ ...p, active: false }))
+                 pmMenuRef.current.active = false
+                 viewRef.current.focus()
+             }}>
                 <span className={`tag-badge type-${opt.type}`}>{opt.label}</span><span className="tag-text">{opt.text}</span>
              </div>
           ))}
