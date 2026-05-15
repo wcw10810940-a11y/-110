@@ -207,13 +207,15 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
     viewRef.current = new EditorView(editorDOMRef.current, {
       state, dispatchTransaction(tr) {
         const next = viewRef.current.state.apply(tr); viewRef.current.updateState(next)
-        if (tr.docChanged || tr.selectionSet) {
+        
+        // 🌟 效能修復點：只有在「文件內容真正改變」時，才重新掃描大綱與更新全文，游標單純移動時絕對不執行！
+        if (tr.docChanged) {
           const h = []; const locs = new Set(), times = new Set(), tags = new Set()
           let i = 1; next.doc.descendants((n, p) => { if (n.type.name === 'scene_heading') { const ps = parseSceneText(n.textContent); if (ps.loc) locs.add(ps.loc); if (ps.time) times.add(ps.time); if (ps.tags) tags.add(ps.tags); h.push({ id: `scene-${i}`, ...ps, num: `S${i++}`, pos: p }) } })
           tagsDataRef.current = { locs: Array.from(locs), times: Array.from(times), tags: Array.from(tags) }
           let ftext = ""; next.doc.descendants(n => { if (n.isBlock && n.textContent) { if (n.type.name === 'scene_heading' || n.type.name === 'character') ftext += `\n\n${n.textContent.toUpperCase()}\n`; else if (n.type.name === 'dialogue') ftext += `${n.textContent}\n`; else ftext += `\n${n.textContent}\n` } })
           onSceneContextChange({ headings: h, ftext: ftext.trim(), pages: Math.max(1, Math.ceil(editorDOMRef.current.clientHeight / 1131)) })
-          if (tr.docChanged) localStorage.setItem('script-studio-data', JSON.stringify(next.doc.toJSON()))
+          localStorage.setItem('script-studio-data', JSON.stringify(next.doc.toJSON()))
         }
       }
     })

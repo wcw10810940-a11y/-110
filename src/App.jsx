@@ -23,10 +23,9 @@ function SortableItem({ id, item, onJump }) {
 
 function App() {
   const [theme, setTheme] = useState('light')
-  const [downloadUrl, setDownloadUrl] = useState("")
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [isFlowMode, setIsFlowMode] = useState(false)
-  const [isGuideOpen, setIsGuideOpen] = useState(false) // 🌟 導覽視窗狀態
+  const [isGuideOpen, setIsGuideOpen] = useState(false)
   const [sceneData, setSceneData] = useState({ headings: [], ftext: '', pages: 1 })
   const editorRef = useRef(null)
   const sensors = useSensors(useSensor(PointerSensor))
@@ -47,10 +46,15 @@ function App() {
     }
   }
 
-  const handleContextChange = (data) => {
-    setSceneData(data)
-    if (downloadUrl) URL.revokeObjectURL(downloadUrl)
-    setDownloadUrl(URL.createObjectURL(new Blob([data.ftext], { type: 'text/plain' })))
+  // 🌟 效能修復：按下匯出時，才動態生成檔案並下載，避免每打一個字就吃資源
+  const handleExportFountain = () => {
+    const blob = new Blob([sceneData.ftext], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `劇本_${new Date().toISOString().slice(0, 10)}.fountain`
+    a.click()
+    URL.revokeObjectURL(url) // 下載完立刻清理記憶體
   }
 
   return (
@@ -61,8 +65,9 @@ function App() {
             <div className="app-logo">劇本工作室 V9</div>
             <div className="menu-item">檔案
               <div className="dropdown">
-                <div className="dropdown-item" onClick={() => { const a = document.createElement('a'); a.href = downloadUrl; a.download = `劇本.fountain`; a.click() }}><span>匯出 Fountain</span></div>
-                <div className="dropdown-item" onClick={() => window.print()}><span>列印 PDF</span></div>
+                <div className="dropdown-item" onClick={handleExportFountain}><span>匯出 Fountain</span><span className="shortcut">⇧⌘E</span></div>
+                <div className="dropdown-divider"></div>
+                <div className="dropdown-item" onClick={() => window.print()}><span>列印 PDF</span><span className="shortcut">⌘P</span></div>
               </div>
             </div>
             <div className="menu-item">設定
@@ -71,7 +76,6 @@ function App() {
                 <div className="dropdown-item" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>切換側邊欄</div>
               </div>
             </div>
-            {/* 🌟 導覽選單 */}
             <div className="menu-item">說明
               <div className="dropdown">
                 <div className="dropdown-item" onClick={() => setIsGuideOpen(true)}>新手寫作導覽</div>
@@ -95,12 +99,11 @@ function App() {
         )}
         <div style={{ flex: 1, background: isFlowMode ? 'var(--bg-main)' : 'var(--bg-board)', overflowY: 'auto', padding: isFlowMode ? '10vh 0' : '50px 0' }}>
           <div className="paper-canvas" style={{ width: '100%', maxWidth: '800px', minHeight: '1131px', margin: '0 auto', background: 'var(--bg-main)', padding: '0 100px', border: isFlowMode ? 'none' : '1px solid var(--border-color)', boxShadow: isFlowMode ? 'none' : 'var(--page-shadow)' }}>
-            <Editor ref={editorRef} onSceneContextChange={handleContextChange} />
+            <Editor ref={editorRef} onSceneContextChange={data => setSceneData(data)} />
           </div>
         </div>
       </div>
 
-      {/* 🌟 導覽 Modal */}
       {isGuideOpen && (
         <div className="modal-overlay" onClick={() => setIsGuideOpen(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
@@ -124,7 +127,7 @@ function App() {
 
             <div className="guide-step">
               <h4><span className="step-num">3</span> 段落切換</h4>
-              <p>使用 <kbd>Tab</kbd> 鍵在「動作 ➔ 角色 ➔ 對白 ➔ 場次」之間快速循環切換。或者輸入 <kbd>@</kbd> 快速變更為角色。</p>
+              <p>使用 <kbd>Tab</kbd> 鍵在「動作 ➔ 角色 ➔ 對白 ➔ 場次」之間快速循環切換。或者輸入 <kbd>@</kbd> 加空白，快速變更為角色。</p>
             </div>
 
             <div className="guide-step">
