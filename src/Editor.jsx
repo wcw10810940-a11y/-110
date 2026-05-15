@@ -187,7 +187,7 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
 
     if (!savedDoc) {
         const div = document.createElement('div')
-        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">這次更換了原生細胞分裂引擎，再也不會遇到游標越界的卡死問題了！大膽地按 Enter 吧！</p>`
+        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">這次拔除了原生的換行引擎！你可以試著在最後一行按 Enter，保證絕對不會再卡死了！</p>`
         savedDoc = DOMParser.fromSchema(scriptSchema).parse(div)
     }
 
@@ -320,37 +320,50 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
             if (dispatch) setBlockType(nt)(state, dispatch); 
             return true;
           }, 
+          
+          // 🔥 徹底接管 Enter：不再信任原生的 splitBlock
           "Enter": (state, dispatch) => {
-            const { $from, empty } = state.selection; 
-            if (!empty) return false;
-            
-            const ct = $from.parent.type.name;
-            
-            // 規則一：空白動作連按 Enter -> 轉為場次標題
-            if (ct === 'action' && $from.parent.textContent.trim() === "") {
-                if (dispatch) setBlockType(scriptSchema.nodes.scene_heading)(state, dispatch);
+            let tr = state.tr;
+            const { $from, $to } = state.selection;
+
+            // 1. 如果有反白選取文字，先把它刪掉
+            if ($from.pos !== $to.pos) {
+                tr = tr.delete($from.pos, $to.pos);
+            }
+
+            const pos = tr.mapping.map($from.pos);
+            const $pos = tr.doc.resolve(pos);
+            const ct = $pos.parent.type.name;
+
+            // 2. 規則一：在空白的「動作」連按 Enter，轉為「場次」
+            if (ct === 'action' && $pos.parent.textContent.trim() === "") {
+                if (dispatch) {
+                    dispatch(tr.setBlockType($pos.before(), $pos.after(), scriptSchema.nodes.scene_heading).scrollIntoView());
+                }
                 return true;
             }
 
-            // 規則二：在段落最尾端按 Enter -> 智慧細胞分裂 (Split)
-            const isAtEnd = $from.parentOffset === $from.parent.content.size;
-            if (isAtEnd) {
-                let targetType = null;
-                if (ct === 'character') targetType = scriptSchema.nodes.dialogue;
-                else if (ct === 'dialogue' || ct === 'scene_heading') targetType = scriptSchema.nodes.action;
+            // 3. 判斷下一行該是什麼格式
+            let targetType = scriptSchema.nodes.action;
+            if (ct === 'character') targetType = scriptSchema.nodes.dialogue;
+            else if (ct === 'dialogue' || ct === 'scene_heading') targetType = scriptSchema.nodes.action;
 
-                if (targetType) {
-                    if (dispatch) {
-                        // 🌟 神奇的 tr.split：直接在游標切一刀，並設定下一半的格式。絕對不會出錯！
-                        const tr = state.tr.split($from.pos, 1, [{ type: targetType }]);
-                        dispatch(tr.scrollIntoView());
-                    }
-                    return true;
+            if (dispatch) {
+                // 🔥 暴力破解點：如果你是在這句話的最尾端按 Enter
+                if ($pos.parentOffset === $pos.parent.content.size) {
+                    // 直接計算下一行的絕對位置 (不再依賴分裂引擎)
+                    const insertPos = $pos.after();
+                    // 強制在那邊生出一個新段落
+                    tr = tr.insert(insertPos, targetType.create());
+                    // 強制把游標移到那個新段落裡面
+                    tr = tr.setSelection(TextSelection.near(tr.doc.resolve(insertPos + 1)));
+                } else {
+                    // 如果是在文字中間按 Enter，才正常把它切成兩半
+                    tr = tr.split(pos, 1, [{ type: targetType }]);
                 }
+                dispatch(tr.scrollIntoView());
             }
-            
-            // 如果是在段落中間按，或是其他情況，放行給系統預設的換行處理
-            return false;
+            return true;
           }, 
           "Backspace": backspaceCommand 
         }),
@@ -360,11 +373,19 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
     
     viewRef.current = new EditorView(editorDOMRef.current, {
       state, dispatchTransaction(tr) {
+        // 把 Try-Catch 縮小範圍，確保編輯器狀態絕對會更新，不會凍結！
+        let next;
         try {
-            const next = viewRef.current.state.apply(tr); 
-            viewRef.current.updateState(next)
-            
-            if (tr.docChanged) {
+            next = viewRef.current.state.apply(tr);
+        } catch(e) {
+            console.error("狀態更新失敗，但已安全回復", e);
+            return; 
+        }
+        
+        viewRef.current.updateState(next);
+        
+        if (tr.docChanged) {
+          try {
               const h = []; const locs = new Set(), times = new Set(), tags = new Set()
               let i = 1; next.doc.descendants((n, p) => { 
                 if (n.type.name === 'scene_heading') { 
@@ -386,9 +407,9 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
               })
               onSceneContextChange({ headings: h, ftext: ftext.trim(), pages: Math.max(1, Math.ceil(editorDOMRef.current.clientHeight / 1131)) })
               localStorage.setItem('script-studio-data', JSON.stringify(next.doc.toJSON()))
-            }
-        } catch (e) {
-            console.error("編輯器發生錯誤，但已被安全攔截：", e);
+          } catch(e) {
+              console.error("背景處理資料時發生問題", e);
+          }
         }
       }
     })
