@@ -9,21 +9,34 @@ import { scriptSchema } from './schema'
 
 const tagMenuKey = new PluginKey('tagMenu')
 
-// 🌟 更聰明的解析器：就算沒有空格也能完美抓取歷史紀錄
 function parseSceneText(rawText) {
   const text = rawText.replace(/^S\d+[\.\s]*/i, '').trim()
   let inOut = '', loc = text, time = '', tags = ''
-  
   const tagMatch = loc.match(/(.*?)\s*\((.*?)\)$/)
   if (tagMatch) { loc = tagMatch[1]; tags = tagMatch[2] }
-  
   const timeMatch = loc.match(/(.*?)(?:\s*-\s*(.*)|\s+(日|夜|晨|昏|DAY|NIGHT))$/i)
   if (timeMatch) { loc = timeMatch[1]; time = timeMatch[2] || timeMatch[3]; }
-  
   const inOutMatch = loc.match(/^(內\.|外\.|內外\.|內\/外\.|INT\.|EXT\.|I\/E\.|內|外)\s*(.*)$/)
   if (inOutMatch) { inOut = inOutMatch[1]; loc = inOutMatch[2] }
-  
   return { inOut: inOut.trim(), loc: loc.replace(/-$/, '').trim(), time: time.trim(), tags: tags.trim(), cleanText: text }
+}
+
+function formatTag(text, type) {
+  let finalTxt = text.trim();
+  if (type === 'inOut') {
+      if (['內', '外', '內外', '內/外'].includes(finalTxt)) finalTxt += '.';
+      else if (!finalTxt.endsWith('.')) finalTxt += '.';
+      finalTxt += ' ';
+  } else if (type === 'loc') {
+      finalTxt += ' ';
+  } else if (type === 'time') {
+      finalTxt = finalTxt.replace(/^-+\s*/, '');
+      finalTxt = '- ' + finalTxt + ' ';
+  } else if (type === 'tag') {
+      finalTxt = finalTxt.replace(/^\(+|\)+$/g, '');
+      finalTxt = '(' + finalTxt + ') ';
+  }
+  return finalTxt;
 }
 
 function getMenuOptions(query, menuType, tagsData) {
@@ -36,8 +49,6 @@ function getMenuOptions(query, menuType, tagsData) {
   
   let filtered = all.filter(o => o.text.toLowerCase().includes(query.toLowerCase()) || o.text.replace(/[-()]/g, '').toLowerCase().includes(query.toLowerCase()))
   filtered = filtered.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i)
-  
-  // 保證永遠有選項，避免 Enter 抓空
   if (query.trim().length > 0 && !filtered.find(f => f.text === query)) {
       filtered.push({ text: query, type: 'new', label: '新增' })
   }
@@ -64,7 +75,6 @@ const autoNumberingPlugin = new Plugin({
   }
 })
 
-// 🌟 原生空白鍵自動排版：無延遲、絕不卡死
 const buildInputRules = () => {
   return inputRules({
     rules: [
@@ -76,24 +86,26 @@ const buildInputRules = () => {
         return tr
       }),
       textblockTypeInputRule(/^@\s$/, scriptSchema.nodes.character),
-      // 輸入 /內 + 空白 -> 自動變 "內. "
       new InputRule(/\/([^\s/]+)\s$/, (state, match, start, end) => {
           let txt = match[1];
           if (['內', '外', '內外', '內/外'].includes(txt)) txt += '.';
           else if (!txt.endsWith('.')) txt += '.';
           return state.tr.replaceWith(start, end, state.schema.text(txt + ' '));
       }),
-      // 輸入 #地點 + 空白 -> 自動變 "地點 "
       new InputRule(/#([^\s#]+)\s$/, (state, match, start, end) => {
           return state.tr.replaceWith(start, end, state.schema.text(match[1] + ' '));
       }),
-      // 輸入 -時間 + 空白 -> 自動變 "- 時間 "
       new InputRule(/-([^\s-]+)\s$/, (state, match, start, end) => {
           return state.tr.replaceWith(start, end, state.schema.text('- ' + match[1] + ' '));
       }),
-      // 輸入 (標記 + 空白 -> 自動變 "(標記) "
       new InputRule(/\(([^\s()]+)\s$/, (state, match, start, end) => {
           return state.tr.replaceWith(start, end, state.schema.text('(' + match[1] + ') '));
+      }),
+      new InputRule(/(?:\*\*)([^*]+)(?:\*\*)$/, (state, match, start, end) => {
+          return state.tr.addMark(start, end, scriptSchema.marks.bold.create())
+      }),
+      new InputRule(/(?:\*)([^*_]+)(?:\*)$/, (state, match, start, end) => {
+          return state.tr.addMark(start, end, scriptSchema.marks.italic.create())
       })
     ]
   })
@@ -155,13 +167,34 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
       let tr = viewRef.current.state.tr.delete(start, end)
       const insPos = newIdx >= headings.length - 1 && newIdx >= oldIdx ? tr.doc.content.size : tr.mapping.map(headings[newIdx > oldIdx ? newIdx + 1 : newIdx].pos)
       viewRef.current.dispatch(tr.insert(insPos, slice.content))
+    },
+    applyFormat: (type, attrs) => {
+      if (!viewRef.current) return
+      const { state, dispatch } = viewRef.current
+      if (type === 'bold') toggleMark(scriptSchema.marks.bold)(state, dispatch)
+      if (type === 'italic') toggleMark(scriptSchema.marks.italic)(state, dispatch)
+      if (type === 'block') setBlockType(scriptSchema.nodes[attrs])(state, dispatch)
+      viewRef.current.focus()
     }
   }))
 
   useEffect(() => {
-    const saved = localStorage.getItem('script-studio-data')
+    let savedDoc = null;
+    try {
+        const saved = localStorage.getItem('script-studio-data')
+        if (saved) savedDoc = Node.fromJSON(scriptSchema, JSON.parse(saved));
+    } catch (e) {
+        console.warn("載入歷史紀錄失敗，將開啟新文件。")
+    }
+
+    if (!savedDoc) {
+        const div = document.createElement('div')
+        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">現在即使發布到網站上，編輯器也不會卡死了！</p>`
+        savedDoc = DOMParser.fromSchema(scriptSchema).parse(div)
+    }
+
     const state = EditorState.create({ 
-      doc: saved ? Node.fromJSON(scriptSchema, JSON.parse(saved)) : DOMParser.fromSchema(scriptSchema).parse(Object.assign(document.createElement('div'), { innerHTML: `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">現在你可以隨心所欲地打字了！</p><p class="action">打完標籤按「空白鍵」瞬間排版，按「Enter」從選單挑選！</p>` })),
+      doc: savedDoc,
       plugins: [ 
         autoNumberingPlugin, 
         new Plugin({
@@ -173,7 +206,6 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
               const currentOptions = getMenuOptions(pmMenuRef.current.query, pmMenuRef.current.menuType, tagsDataRef.current)
               if (currentOptions.length === 0) return false; 
               
-              // 🌟 安全的索引計算
               const safeIndex = Math.min(pmMenuRef.current.selectedIndex, currentOptions.length - 1)
 
               if (event.key === 'ArrowDown') { 
@@ -189,17 +221,32 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
                   return true 
               }
 
-              if (event.key === 'Enter' || event.key === 'Tab') { 
-                  event.preventDefault()
-                  const sel = currentOptions[Math.max(0, safeIndex)]
-                  if (sel) {
-                      let txt = sel.text
-                      if (pmMenuRef.current.menuType === 'inOut' || pmMenuRef.current.menuType === 'loc') txt += ' '
-                      if (pmMenuRef.current.menuType === 'time') txt = `- ${txt} `
-                      if (pmMenuRef.current.menuType === 'tag') txt = `(${txt}) `
-                      
-                      view.dispatch(view.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, view.state.schema.text(txt)))
+              if (event.key === 'Enter' || event.key === 'Tab' || event.key === ' ') { 
+                  let txtToInsert = ''
+                  
+                  if (event.key === ' ') {
+                      if (!pmMenuRef.current.query.trim()) {
+                          setMenuData(p => ({ ...p, active: false }));
+                          pmMenuRef.current.active = false;
+                          return false; 
+                      }
+                      txtToInsert = pmMenuRef.current.query;
+                  } 
+                  else {
+                      const sel = currentOptions[Math.max(0, safeIndex)]
+                      if (!sel) {
+                          setMenuData(p => ({ ...p, active: false }));
+                          pmMenuRef.current.active = false;
+                          return false;
+                      }
+                      txtToInsert = sel.text;
                   }
+
+                  const finalTxt = formatTag(txtToInsert, pmMenuRef.current.menuType);
+
+                  event.preventDefault();
+                  view.dispatch(view.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, view.state.schema.text(finalTxt)));
+                  
                   setMenuData(p => ({ ...p, active: false }))
                   pmMenuRef.current.active = false
                   return true 
@@ -286,30 +333,36 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
     
     viewRef.current = new EditorView(editorDOMRef.current, {
       state, dispatchTransaction(tr) {
-        const next = viewRef.current.state.apply(tr); viewRef.current.updateState(next)
-        
-        if (tr.docChanged) {
-          const h = []; const locs = new Set(), times = new Set(), tags = new Set()
-          let i = 1; next.doc.descendants((n, p) => { 
-            if (n.type.name === 'scene_heading') { 
-              const ps = parseSceneText(n.textContent); 
-              if (ps.loc) locs.add(ps.loc); 
-              if (ps.time) times.add(ps.time); 
-              if (ps.tags) tags.add(ps.tags); 
-              h.push({ id: `scene-${i}`, ...ps, num: `S${i++}`, pos: p }) 
-            } 
-          })
-          tagsDataRef.current = { locs: Array.from(locs), times: Array.from(times), tags: Array.from(tags) }
-          
-          let ftext = ""; next.doc.descendants(n => { 
-            if (n.isBlock && n.textContent) { 
-              if (n.type.name === 'scene_heading' || n.type.name === 'character') ftext += `\n\n${n.textContent.toUpperCase()}\n`; 
-              else if (n.type.name === 'dialogue') ftext += `${n.textContent}\n`; 
-              else ftext += `\n${n.textContent}\n` 
-            } 
-          })
-          onSceneContextChange({ headings: h, ftext: ftext.trim(), pages: Math.max(1, Math.ceil(editorDOMRef.current.clientHeight / 1131)) })
-          localStorage.setItem('script-studio-data', JSON.stringify(next.doc.toJSON()))
+        // 🌟 防護罩：捕獲任何在生產環境中可能發生的意外錯誤
+        try {
+            const next = viewRef.current.state.apply(tr); 
+            viewRef.current.updateState(next)
+            
+            if (tr.docChanged) {
+              const h = []; const locs = new Set(), times = new Set(), tags = new Set()
+              let i = 1; next.doc.descendants((n, p) => { 
+                if (n.type.name === 'scene_heading') { 
+                  const ps = parseSceneText(n.textContent); 
+                  if (ps.loc) locs.add(ps.loc); 
+                  if (ps.time) times.add(ps.time); 
+                  if (ps.tags) tags.add(ps.tags); 
+                  h.push({ id: `scene-${i}`, ...ps, num: `S${i++}`, pos: p }) 
+                } 
+              })
+              tagsDataRef.current = { locs: Array.from(locs), times: Array.from(times), tags: Array.from(tags) }
+              
+              let ftext = ""; next.doc.descendants(n => { 
+                if (n.isBlock && n.textContent) { 
+                  if (n.type.name === 'scene_heading' || n.type.name === 'character') ftext += `\n\n${n.textContent.toUpperCase()}\n`; 
+                  else if (n.type.name === 'dialogue') ftext += `${n.textContent}\n`; 
+                  else ftext += `\n${n.textContent}\n` 
+                } 
+              })
+              onSceneContextChange({ headings: h, ftext: ftext.trim(), pages: Math.max(1, Math.ceil(editorDOMRef.current.clientHeight / 1131)) })
+              localStorage.setItem('script-studio-data', JSON.stringify(next.doc.toJSON()))
+            }
+        } catch (e) {
+            console.error("編輯器發生錯誤，但已被安全攔截：", e);
         }
       }
     })
@@ -334,11 +387,8 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
           {options.map((opt, i) => (
              <div key={i} className={`tag-option ${i === selectedIndex ? 'selected' : ''}`} onMouseDown={(e) => { 
                  e.preventDefault(); 
-                 let txt = opt.text
-                 if (menuData.menuType === 'inOut' || menuData.menuType === 'loc') txt += ' '
-                 if (menuData.menuType === 'time') txt = `- ${txt} `
-                 if (menuData.menuType === 'tag') txt = `(${txt}) `
-                 viewRef.current.dispatch(viewRef.current.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, viewRef.current.state.schema.text(txt)))
+                 const finalTxt = formatTag(opt.text, menuData.menuType);
+                 viewRef.current.dispatch(viewRef.current.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, viewRef.current.state.schema.text(finalTxt)))
                  setMenuData(p => ({ ...p, active: false }))
                  pmMenuRef.current.active = false
                  viewRef.current.focus()
