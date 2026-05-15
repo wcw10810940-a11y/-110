@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } f
 import { EditorState, TextSelection, Plugin, PluginKey } from 'prosemirror-state'
 import { EditorView } from 'prosemirror-view'
 import { keymap } from 'prosemirror-keymap'
-import { baseKeymap, setBlockType, toggleMark } from 'prosemirror-commands'
+// 🌟 核心改變：引入了原廠的 splitBlock 引擎
+import { baseKeymap, setBlockType, toggleMark, splitBlock } from 'prosemirror-commands'
 import { DOMParser, Node } from 'prosemirror-model' 
 import { InputRule, inputRules, textblockTypeInputRule } from 'prosemirror-inputrules'
 import { scriptSchema } from './schema'
@@ -187,7 +188,7 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
 
     if (!savedDoc) {
         const div = document.createElement('div')
-        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">這次徹底修復了游標脫節的問題，請盡情地按 Enter 測試吧！</p>`
+        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">這次換上了原廠的智慧換行引擎！絕對不會再有幽靈游標導致畫面縮回去了！</p>`
         savedDoc = DOMParser.fromSchema(scriptSchema).parse(div)
     }
 
@@ -321,49 +322,37 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
             return true;
           }, 
           
-          // 🔥 無敵 Enter 處理器
+          // 🔥 終極大和解：交給原廠 splitBlock 處理！
           "Enter": (state, dispatch) => {
-            let tr = state.tr;
-            const { $from, $to } = state.selection;
-
-            // 1. 如果有選取文字，先刪除
-            if ($from.pos !== $to.pos) {
-                tr = tr.delete($from.pos, $to.pos);
-            }
-
-            const pos = tr.mapping.map($from.pos);
-            const $pos = tr.doc.resolve(pos);
-            const ct = $pos.parent.type.name;
-
-            // 2. 規則一：在空白的「動作」連按 Enter，轉為「場次」
-            if (ct === 'action' && $pos.parent.textContent.trim() === "") {
-                if (dispatch) {
-                    dispatch(tr.setBlockType($pos.before(), $pos.after(), scriptSchema.nodes.scene_heading).scrollIntoView());
-                }
+            const { $from, empty } = state.selection; 
+            if (!empty) return false;
+            
+            const ct = $from.parent.type.name;
+            
+            // 規則一：空白動作連按 Enter -> 轉為場次標題
+            if (ct === 'action' && $from.parent.textContent.trim() === "") {
+                if (dispatch) setBlockType(scriptSchema.nodes.scene_heading)(state, dispatch);
                 return true;
             }
 
-            // 3. 判斷下一行該是什麼格式
-            let targetType = scriptSchema.nodes.action;
-            if (ct === 'character') targetType = scriptSchema.nodes.dialogue;
-            else if (ct === 'dialogue' || ct === 'scene_heading') targetType = scriptSchema.nodes.action;
+            let handled = false;
+            // 呼叫原廠完美的換行功能
+            splitBlock(state, (tr) => {
+                handled = true;
+                
+                let targetType = null;
+                if (ct === 'character') targetType = scriptSchema.nodes.dialogue;
+                else if (ct === 'dialogue' || ct === 'scene_heading') targetType = scriptSchema.nodes.action;
 
-            if (dispatch) {
-                try {
-                    // 🔥 使用原生 split 切割段落
-                    tr = tr.split(pos, 1, [{ type: targetType }]);
-                    
-                    if (tr.docChanged) {
-                        // 🔥 核心修正：強制把游標拉進新產生的段落內 (pos + 2)
-                        // 使用 .near 來保證就算計算有微小誤差，也不會報錯死機
-                        tr = tr.setSelection(TextSelection.near(tr.doc.resolve(pos + 2)));
-                    }
-                    dispatch(tr.scrollIntoView());
-                } catch (e) {
-                    console.error("Enter 換行防護機制觸發", e);
+                // 原廠換完行後，游標必定安全地待在新段落裡，我們只要給新段落套上正確的格式就好！
+                if (targetType) {
+                    tr.setNodeMarkup(tr.selection.$from.before(), targetType);
                 }
-            }
-            return true;
+                
+                if (dispatch) dispatch(tr.scrollIntoView());
+            });
+            
+            return handled;
           }, 
           "Backspace": backspaceCommand 
         }),
@@ -373,13 +362,17 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
     
     viewRef.current = new EditorView(editorDOMRef.current, {
       state, dispatchTransaction(tr) {
+        let next;
         try {
-            // 套用變更
-            const next = viewRef.current.state.apply(tr); 
-            viewRef.current.updateState(next)
+            next = viewRef.current.state.apply(tr); 
+            viewRef.current.updateState(next);
+        } catch (e) {
+            console.error("狀態更新被攔截:", e);
+            return;
+        }
             
-            // 背景同步資料
-            if (tr.docChanged) {
+        if (tr.docChanged) {
+          try {
               const h = []; const locs = new Set(), times = new Set(), tags = new Set()
               let i = 1; next.doc.descendants((n, p) => { 
                 if (n.type.name === 'scene_heading') { 
@@ -401,11 +394,9 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
               })
               onSceneContextChange({ headings: h, ftext: ftext.trim(), pages: Math.max(1, Math.ceil(editorDOMRef.current.clientHeight / 1131)) })
               localStorage.setItem('script-studio-data', JSON.stringify(next.doc.toJSON()))
-            }
-        } catch (e) {
-            console.error("已啟動系統防護，攔截致命錯誤：", e);
-            // 🔥 反彈裝甲：如果發生任何錯誤，強迫編輯器回朔到上一步的安全狀態，拒絕當機！
-            viewRef.current.updateState(viewRef.current.state);
+          } catch(e) {
+              console.error("儲存資料失敗:", e);
+          }
         }
       }
     })
@@ -436,7 +427,7 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
                  pmMenuRef.current.active = false
                  viewRef.current.focus()
              }}>
-                 <span className={`tag-badge type-${opt.type}`}>{opt.label}</span><span className="tag-text">{opt.text}</span>
+                <span className={`tag-badge type-${opt.type}`}>{opt.label}</span><span className="tag-text">{opt.text}</span>
              </div>
           ))}
         </div>
