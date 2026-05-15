@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react'
 import { EditorState, TextSelection, Plugin, PluginKey } from 'prosemirror-state'
 import { EditorView } from 'prosemirror-view'
 import { keymap } from 'prosemirror-keymap'
@@ -9,36 +9,21 @@ import { scriptSchema } from './schema'
 
 const tagMenuKey = new PluginKey('tagMenu')
 
-// 解析場次維度
+// 🌟 更聰明的解析器：就算沒有空格也能完美抓取歷史紀錄
 function parseSceneText(rawText) {
   const text = rawText.replace(/^S\d+[\.\s]*/i, '').trim()
   let inOut = '', loc = text, time = '', tags = ''
+  
   const tagMatch = loc.match(/(.*?)\s*\((.*?)\)$/)
   if (tagMatch) { loc = tagMatch[1]; tags = tagMatch[2] }
+  
   const timeMatch = loc.match(/(.*?)(?:\s*-\s*(.*)|\s+(日|夜|晨|昏|DAY|NIGHT))$/i)
   if (timeMatch) { loc = timeMatch[1]; time = timeMatch[2] || timeMatch[3]; }
+  
   const inOutMatch = loc.match(/^(內\.|外\.|內外\.|內\/外\.|INT\.|EXT\.|I\/E\.|內|外)\s*(.*)$/)
   if (inOutMatch) { inOut = inOutMatch[1]; loc = inOutMatch[2] }
+  
   return { inOut: inOut.trim(), loc: loc.replace(/-$/, '').trim(), time: time.trim(), tags: tags.trim(), cleanText: text }
-}
-
-// 🌟 全新工具：全域標籤自動排版器 (處理空白鍵與 Enter 鍵的格式轉換)
-function formatTag(text, type) {
-  let finalTxt = text.trim();
-  if (type === 'inOut') {
-      if (finalTxt === '內' || finalTxt === '外' || finalTxt === '內外' || finalTxt === '內/外') finalTxt += '.';
-      else if (!finalTxt.endsWith('.')) finalTxt += '.';
-      finalTxt += ' ';
-  } else if (type === 'loc') {
-      finalTxt += ' ';
-  } else if (type === 'time') {
-      finalTxt = finalTxt.replace(/^-+\s*/, '');
-      finalTxt = '- ' + finalTxt + ' ';
-  } else if (type === 'tag') {
-      finalTxt = finalTxt.replace(/^\(+|\)+$/g, '');
-      finalTxt = '(' + finalTxt + ') ';
-  }
-  return finalTxt;
 }
 
 function getMenuOptions(query, menuType, tagsData) {
@@ -51,8 +36,10 @@ function getMenuOptions(query, menuType, tagsData) {
   
   let filtered = all.filter(o => o.text.toLowerCase().includes(query.toLowerCase()) || o.text.replace(/[-()]/g, '').toLowerCase().includes(query.toLowerCase()))
   filtered = filtered.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i)
+  
+  // 保證永遠有選項，避免 Enter 抓空
   if (query.trim().length > 0 && !filtered.find(f => f.text === query)) {
-      filtered.push({ text: query, type: 'new', label: '自訂' })
+      filtered.push({ text: query, type: 'new', label: '新增' })
   }
   return filtered
 }
@@ -77,6 +64,7 @@ const autoNumberingPlugin = new Plugin({
   }
 })
 
+// 🌟 原生空白鍵自動排版：無延遲、絕不卡死
 const buildInputRules = () => {
   return inputRules({
     rules: [
@@ -88,11 +76,24 @@ const buildInputRules = () => {
         return tr
       }),
       textblockTypeInputRule(/^@\s$/, scriptSchema.nodes.character),
-      new InputRule(/(?:\*\*)([^*]+)(?:\*\*)$/, (state, match, start, end) => {
-          return state.tr.addMark(start, end, scriptSchema.marks.bold.create())
+      // 輸入 /內 + 空白 -> 自動變 "內. "
+      new InputRule(/\/([^\s/]+)\s$/, (state, match, start, end) => {
+          let txt = match[1];
+          if (['內', '外', '內外', '內/外'].includes(txt)) txt += '.';
+          else if (!txt.endsWith('.')) txt += '.';
+          return state.tr.replaceWith(start, end, state.schema.text(txt + ' '));
       }),
-      new InputRule(/(?:\*)([^*_]+)(?:\*)$/, (state, match, start, end) => {
-          return state.tr.addMark(start, end, scriptSchema.marks.italic.create())
+      // 輸入 #地點 + 空白 -> 自動變 "地點 "
+      new InputRule(/#([^\s#]+)\s$/, (state, match, start, end) => {
+          return state.tr.replaceWith(start, end, state.schema.text(match[1] + ' '));
+      }),
+      // 輸入 -時間 + 空白 -> 自動變 "- 時間 "
+      new InputRule(/-([^\s-]+)\s$/, (state, match, start, end) => {
+          return state.tr.replaceWith(start, end, state.schema.text('- ' + match[1] + ' '));
+      }),
+      // 輸入 (標記 + 空白 -> 自動變 "(標記) "
+      new InputRule(/\(([^\s()]+)\s$/, (state, match, start, end) => {
+          return state.tr.replaceWith(start, end, state.schema.text('(' + match[1] + ') '));
       })
     ]
   })
@@ -127,6 +128,7 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
   const [selectedIndex, setSelectedIndex] = useState(0)
   
   const pmMenuRef = useRef({ active: false, query: '', menuType: null, from: 0, to: 0, selectedIndex: 0 })
+
   const options = menuData.active ? getMenuOptions(menuData.query, menuData.menuType, tagsDataRef.current) : []
 
   useEffect(() => {
@@ -153,21 +155,13 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
       let tr = viewRef.current.state.tr.delete(start, end)
       const insPos = newIdx >= headings.length - 1 && newIdx >= oldIdx ? tr.doc.content.size : tr.mapping.map(headings[newIdx > oldIdx ? newIdx + 1 : newIdx].pos)
       viewRef.current.dispatch(tr.insert(insPos, slice.content))
-    },
-    applyFormat: (type, attrs) => {
-      if (!viewRef.current) return
-      const { state, dispatch } = viewRef.current
-      if (type === 'bold') toggleMark(scriptSchema.marks.bold)(state, dispatch)
-      if (type === 'italic') toggleMark(scriptSchema.marks.italic)(state, dispatch)
-      if (type === 'block') setBlockType(scriptSchema.nodes[attrs])(state, dispatch)
-      viewRef.current.focus()
     }
   }))
 
   useEffect(() => {
     const saved = localStorage.getItem('script-studio-data')
     const state = EditorState.create({ 
-      doc: saved ? Node.fromJSON(scriptSchema, JSON.parse(saved)) : DOMParser.fromSchema(scriptSchema).parse(Object.assign(document.createElement('div'), { innerHTML: `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">歡迎使用！點選上方選單的「新手導覽」了解如何高效寫作。</p>` })),
+      doc: saved ? Node.fromJSON(scriptSchema, JSON.parse(saved)) : DOMParser.fromSchema(scriptSchema).parse(Object.assign(document.createElement('div'), { innerHTML: `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">現在你可以隨心所欲地打字了！</p><p class="action">打完標籤按「空白鍵」瞬間排版，按「Enter」從選單挑選！</p>` })),
       plugins: [ 
         autoNumberingPlugin, 
         new Plugin({
@@ -177,52 +171,35 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
               if (!pmMenuRef.current.active) return false
               
               const currentOptions = getMenuOptions(pmMenuRef.current.query, pmMenuRef.current.menuType, tagsDataRef.current)
+              if (currentOptions.length === 0) return false; 
               
+              // 🌟 安全的索引計算
+              const safeIndex = Math.min(pmMenuRef.current.selectedIndex, currentOptions.length - 1)
+
               if (event.key === 'ArrowDown') { 
                   event.preventDefault()
-                  pmMenuRef.current.selectedIndex = Math.min(pmMenuRef.current.selectedIndex + 1, currentOptions.length - 1)
+                  pmMenuRef.current.selectedIndex = Math.min(safeIndex + 1, currentOptions.length - 1)
                   setSelectedIndex(pmMenuRef.current.selectedIndex)
                   return true 
               }
               if (event.key === 'ArrowUp') { 
                   event.preventDefault()
-                  pmMenuRef.current.selectedIndex = Math.max(pmMenuRef.current.selectedIndex - 1, 0)
+                  pmMenuRef.current.selectedIndex = Math.max(safeIndex - 1, 0)
                   setSelectedIndex(pmMenuRef.current.selectedIndex)
                   return true 
               }
 
-              // 🌟 核心防護機制與空白鍵排版
-              if (event.key === 'Enter' || event.key === 'Tab' || event.key === ' ') { 
-                  let txtToInsert = ''
-                  
-                  // 情境 A：使用者按下空白鍵 (代表他想直接用鍵盤打字，不選選單)
-                  if (event.key === ' ') {
-                      // 如果他只打了觸發符號(如 /)就按空白，讓他正常打出空白並關閉選單
-                      if (!pmMenuRef.current.query.trim()) {
-                          setMenuData(p => ({ ...p, active: false }));
-                          pmMenuRef.current.active = false;
-                          return false; 
-                      }
-                      txtToInsert = pmMenuRef.current.query;
-                  } 
-                  // 情境 B：使用者按下 Enter/Tab (代表他想使用選單選項)
-                  else {
-                      const sel = currentOptions[pmMenuRef.current.selectedIndex] || currentOptions[0]
-                      // 🌟 防卡死機制：如果真的找不到選項，立刻把鍵盤權限還給使用者，並關閉選單！
-                      if (!sel) {
-                          setMenuData(p => ({ ...p, active: false }));
-                          pmMenuRef.current.active = false;
-                          return false;
-                      }
-                      txtToInsert = sel.text;
+              if (event.key === 'Enter' || event.key === 'Tab') { 
+                  event.preventDefault()
+                  const sel = currentOptions[Math.max(0, safeIndex)]
+                  if (sel) {
+                      let txt = sel.text
+                      if (pmMenuRef.current.menuType === 'inOut' || pmMenuRef.current.menuType === 'loc') txt += ' '
+                      if (pmMenuRef.current.menuType === 'time') txt = `- ${txt} `
+                      if (pmMenuRef.current.menuType === 'tag') txt = `(${txt}) `
+                      
+                      view.dispatch(view.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, view.state.schema.text(txt)))
                   }
-
-                  // 執行自動排版
-                  const finalTxt = formatTag(txtToInsert, pmMenuRef.current.menuType);
-
-                  event.preventDefault();
-                  view.dispatch(view.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, view.state.schema.text(finalTxt)));
-                  
                   setMenuData(p => ({ ...p, active: false }))
                   pmMenuRef.current.active = false
                   return true 
@@ -337,7 +314,6 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
       }
     })
     
-    // 初始化時手動觸發一次分析，確保載入就有歷史紀錄
     const initLocs = new Set(), initTimes = new Set(), initTags = new Set()
     state.doc.descendants((n) => { 
       if (n.type.name === 'scene_heading') { 
@@ -358,9 +334,11 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
           {options.map((opt, i) => (
              <div key={i} className={`tag-option ${i === selectedIndex ? 'selected' : ''}`} onMouseDown={(e) => { 
                  e.preventDefault(); 
-                 // 🌟 滑鼠點擊也使用全域格式器，確保行為100%一致
-                 const finalTxt = formatTag(opt.text, menuData.menuType);
-                 viewRef.current.dispatch(viewRef.current.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, viewRef.current.state.schema.text(finalTxt)))
+                 let txt = opt.text
+                 if (menuData.menuType === 'inOut' || menuData.menuType === 'loc') txt += ' '
+                 if (menuData.menuType === 'time') txt = `- ${txt} `
+                 if (menuData.menuType === 'tag') txt = `(${txt}) `
+                 viewRef.current.dispatch(viewRef.current.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, viewRef.current.state.schema.text(txt)))
                  setMenuData(p => ({ ...p, active: false }))
                  pmMenuRef.current.active = false
                  viewRef.current.focus()
