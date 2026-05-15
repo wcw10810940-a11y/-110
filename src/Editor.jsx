@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react'
 import { EditorState, TextSelection, Plugin, PluginKey } from 'prosemirror-state'
 import { EditorView } from 'prosemirror-view'
 import { keymap } from 'prosemirror-keymap'
@@ -81,6 +81,21 @@ const backspaceCommand = (state, dispatch) => {
   return false
 }
 
+// 🌟 純粹同步函數：脫離 React 延遲，實時產出選單選項
+function getMenuOptions(query, menuType, tagsData) {
+    if (!menuType) return []
+    let all = []
+    if (menuType === 'inOut') all = ['內.', '外.', '內/外.'].map(t => ({ text: t, type: 'inOut', label: '內/外' }))
+    else if (menuType === 'loc') all = tagsData.locs.map(t => ({ text: t, type: 'loc', label: '地點' }))
+    else if (menuType === 'time') all = ['日', '夜', '晨', '昏', ...tagsData.times.filter(t => !['日','夜','晨','昏'].includes(t))].map(t => ({ text: t, type: 'time', label: '時間' }))
+    else if (menuType === 'tag') all = tagsData.tags.map(t => ({ text: t, type: 'tag', label: '標記' }))
+    
+    let filtered = all.filter(o => o.text.toLowerCase().includes(query.toLowerCase()) || o.text.replace(/[-()]/g, '').toLowerCase().includes(query.toLowerCase()))
+    filtered = filtered.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i)
+    if (query.trim().length > 0) filtered.push({ text: query, type: 'new', label: '自訂' })
+    return filtered
+}
+
 const Editor = forwardRef(({ onSceneContextChange }, ref) => {
   const editorDOMRef = useRef(null)
   const viewRef = useRef(null)
@@ -90,33 +105,11 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
   const [menuData, setMenuData] = useState({ active: false, coords: null, query: '', menuType: null, from: 0, to: 0 })
   const [selectedIndex, setSelectedIndex] = useState(0)
   
-  // 🌟 核心修復：這座橋樑確保編輯器按鍵事件永遠能拿到最新的選項資料
-  const menuStateRef = useRef({ options: [], selectedIndex: 0 })
-  const pmMenuRef = useRef({ active: false, query: '', menuType: null, from: 0, to: 0 })
+  // ProseMirror 專用即時狀態，絕對不會延遲
+  const pmMenuRef = useRef({ active: false, query: '', menuType: null, from: 0, to: 0, selectedIndex: 0 })
 
-  const options = useMemo(() => {
-     if (!menuData.active) return []
-     let all = []
-     if (menuData.menuType === 'inOut') all = ['內.', '外.', '內/外.'].map(t => ({ text: t, type: 'inOut', label: '內/外' }))
-     else if (menuData.menuType === 'loc') all = tagsDataRef.current.locs.map(t => ({ text: t, type: 'loc', label: '地點' }))
-     else if (menuData.menuType === 'time') all = ['日', '夜', '晨', '昏', ...tagsDataRef.current.times.filter(t => !['日','夜','晨','昏'].includes(t))].map(t => ({ text: t, type: 'time', label: '時間' }))
-     else if (menuData.menuType === 'tag') all = tagsDataRef.current.tags.map(t => ({ text: t, type: 'tag', label: '標記' }))
-     
-     let filtered = all.filter(o => o.text.toLowerCase().includes(menuData.query.toLowerCase()))
-     filtered = filtered.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i)
-     if (menuData.query.trim().length > 0) filtered.push({ text: menuData.query, type: 'new', label: '自訂' })
-     return filtered
-  }, [menuData.query, menuData.active, menuData.menuType])
-
-  // 🌟 同步更新橋樑內的資料
-  useEffect(() => {
-     menuStateRef.current.options = options
-     setSelectedIndex(prev => {
-        const next = Math.min(prev, Math.max(0, options.length - 1))
-        menuStateRef.current.selectedIndex = next
-        return next
-     })
-  }, [options])
+  // 供畫面渲染使用的動態陣列
+  const options = menuData.active ? getMenuOptions(menuData.query, menuData.menuType, tagsDataRef.current) : []
 
   useEffect(() => {
     if (menuData.active && menuScrollRef.current) {
@@ -156,7 +149,7 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
   useEffect(() => {
     const saved = localStorage.getItem('script-studio-data')
     const state = EditorState.create({ 
-      doc: saved ? Node.fromJSON(scriptSchema, JSON.parse(saved)) : DOMParser.fromSchema(scriptSchema).parse(Object.assign(document.createElement('div'), { innerHTML: `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">歡迎使用！點選上方選單的「新手導覽」了解如何高效寫作。</p>` })),
+      doc: saved ? Node.fromJSON(scriptSchema, JSON.parse(saved)) : DOMParser.fromSchema(scriptSchema).parse(Object.assign(document.createElement('div'), { innerHTML: `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">現在快捷選單不會卡死了！</p>` })),
       plugins: [ 
         autoNumberingPlugin, 
         new Plugin({
@@ -165,29 +158,24 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
             handleKeyDown(view, event) {
               if (!pmMenuRef.current.active) return false
               
+              // 即時計算當下最新的選項清單
+              const currentOptions = getMenuOptions(pmMenuRef.current.query, pmMenuRef.current.menuType, tagsDataRef.current)
+              
               if (event.key === 'ArrowDown') { 
                   event.preventDefault()
-                  setSelectedIndex(prev => {
-                      const next = Math.min(prev + 1, menuStateRef.current.options.length - 1)
-                      menuStateRef.current.selectedIndex = next // 同步寫入最新狀態
-                      return next
-                  })
+                  pmMenuRef.current.selectedIndex = Math.min(pmMenuRef.current.selectedIndex + 1, currentOptions.length - 1)
+                  setSelectedIndex(pmMenuRef.current.selectedIndex)
                   return true 
               }
               if (event.key === 'ArrowUp') { 
                   event.preventDefault()
-                  setSelectedIndex(prev => {
-                      const next = Math.max(prev - 1, 0)
-                      menuStateRef.current.selectedIndex = next
-                      return next
-                  })
+                  pmMenuRef.current.selectedIndex = Math.max(pmMenuRef.current.selectedIndex - 1, 0)
+                  setSelectedIndex(pmMenuRef.current.selectedIndex)
                   return true 
               }
               if (event.key === 'Enter' || event.key === 'Tab') { 
                   event.preventDefault()
-                  // 🌟 從橋樑拿取最新選中的項目
-                  const { options, selectedIndex } = menuStateRef.current
-                  const sel = options[selectedIndex]
+                  const sel = currentOptions[pmMenuRef.current.selectedIndex] || currentOptions[0]
                   if (sel) {
                       let txt = sel.text
                       if (pmMenuRef.current.menuType === 'inOut' || pmMenuRef.current.menuType === 'loc') txt += ' '
@@ -214,10 +202,13 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
               update(view) {
                 const { $from, empty } = view.state.selection
                 if (!empty || $from.parent.type.name !== 'scene_heading') { 
-                    setMenuData(p => ({ ...p, active: false }))
-                    pmMenuRef.current.active = false
+                    if (pmMenuRef.current.active) {
+                        setMenuData(p => ({ ...p, active: false }))
+                        pmMenuRef.current.active = false
+                    }
                     return 
                 }
+                
                 const textBefore = $from.parent.textBetween(0, $from.parentOffset)
                 let q = null, mt = null, ml = 0
                 const mIn = textBefore.match(/\/([^\s/]*)$/), mLoc = textBefore.match(/#([^\s#]*)$/), mTim = textBefore.match(/-([^\s-]*)$/), mTag = textBefore.match(/\(([^\s()]*)$/)
@@ -229,11 +220,25 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
                 
                 if (mt) {
                   const coords = view.coordsAtPos($from.pos)
-                  pmMenuRef.current = { ...pmMenuRef.current, active: true, query: q, menuType: mt, from: $from.pos - ml, to: $from.pos }
+                  const isNewTrigger = !pmMenuRef.current.active || pmMenuRef.current.menuType !== mt || pmMenuRef.current.query !== q
+                  
+                  pmMenuRef.current.active = true
+                  pmMenuRef.current.query = q
+                  pmMenuRef.current.menuType = mt
+                  pmMenuRef.current.from = $from.pos - ml
+                  pmMenuRef.current.to = $from.pos
+                  
+                  if (isNewTrigger) {
+                      pmMenuRef.current.selectedIndex = 0
+                      setSelectedIndex(0)
+                  }
+                  
                   setMenuData({ active: true, query: q, menuType: mt, coords: { top: coords.bottom + 4, left: coords.left } })
                 } else { 
-                  setMenuData(p => ({ ...p, active: false }))
-                  pmMenuRef.current.active = false 
+                  if (pmMenuRef.current.active) {
+                      setMenuData(p => ({ ...p, active: false }))
+                      pmMenuRef.current.active = false 
+                  }
                 }
               }
             }
@@ -288,6 +293,17 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
         }
       }
     })
+    
+    // 初始化時手動觸發一次分析，讓第一次載入就有歷史紀錄
+    const initialDesc = []; const initLocs = new Set(), initTimes = new Set(), initTags = new Set()
+    state.doc.descendants((n) => { 
+      if (n.type.name === 'scene_heading') { 
+        const ps = parseSceneText(n.textContent); 
+        if (ps.loc) initLocs.add(ps.loc); if (ps.time) initTimes.add(ps.time); if (ps.tags) initTags.add(ps.tags);
+      } 
+    })
+    tagsDataRef.current = { locs: Array.from(initLocs), times: Array.from(initTimes), tags: Array.from(initTags) }
+
     return () => viewRef.current?.destroy()
   }, [])
 
@@ -299,7 +315,6 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
           {options.map((opt, i) => (
              <div key={i} className={`tag-option ${i === selectedIndex ? 'selected' : ''}`} onMouseDown={(e) => { 
                  e.preventDefault(); 
-                 // 🌟 滑鼠點擊時的防呆機制：確保立刻拿到正確的項目
                  let txt = opt.text
                  if (menuData.menuType === 'inOut' || menuData.menuType === 'loc') txt += ' '
                  if (menuData.menuType === 'time') txt = `- ${txt} `
