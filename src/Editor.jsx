@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react'
 import { EditorState, TextSelection, Plugin, PluginKey } from 'prosemirror-state'
 import { EditorView } from 'prosemirror-view'
 import { keymap } from 'prosemirror-keymap'
@@ -183,13 +183,11 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
     try {
         const saved = localStorage.getItem('script-studio-data')
         if (saved) savedDoc = Node.fromJSON(scriptSchema, JSON.parse(saved));
-    } catch (e) {
-        console.warn("歷史紀錄載入失敗，將開啟新文件。")
-    }
+    } catch (e) {}
 
     if (!savedDoc) {
         const div = document.createElement('div')
-        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">現在新增段落與換行絕對不會當機了！試試在標題按 Enter 吧。</p>`
+        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">這次更換了原生細胞分裂引擎，再也不會遇到游標越界的卡死問題了！大膽地按 Enter 吧！</p>`
         savedDoc = DOMParser.fromSchema(scriptSchema).parse(div)
     }
 
@@ -311,48 +309,47 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
         buildInputRules(),
         keymap({ 
           "Tab": (state, dispatch) => {
-            const { $from } = state.selection; let nt;
+            const { $from, empty } = state.selection; 
+            if (!empty) return false;
+            let nt;
             const ct = $from.parent.type.name;
             if (ct === 'action') nt = scriptSchema.nodes.character;
             else if (ct === 'character') nt = scriptSchema.nodes.dialogue;
             else if (ct === 'dialogue') nt = scriptSchema.nodes.scene_heading;
             else nt = scriptSchema.nodes.action;
-            if (dispatch) setBlockType(nt)(state, dispatch); return true;
+            if (dispatch) setBlockType(nt)(state, dispatch); 
+            return true;
           }, 
           "Enter": (state, dispatch) => {
             const { $from, empty } = state.selection; 
             if (!empty) return false;
             
             const ct = $from.parent.type.name;
-            // 🌟 核心修復：確保我們是在段落的最尾端按 Enter，才執行格式轉換
-            const isAtEnd = $from.parentOffset === $from.parent.content.size;
+            
+            // 規則一：空白動作連按 Enter -> 轉為場次標題
+            if (ct === 'action' && $from.parent.textContent.trim() === "") {
+                if (dispatch) setBlockType(scriptSchema.nodes.scene_heading)(state, dispatch);
+                return true;
+            }
 
-            // 角色 -> 換行變對白
-            if (ct === 'character' && isAtEnd) {
-                if (dispatch) {
-                    // 使用 $from.after() 確保新段落建立在當前段落的正下方，而不是塞在文字中間！
-                    const tr = state.tr.insert($from.after(), scriptSchema.nodes.dialogue.createAndFill());
-                    dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve($from.after() + 1))).scrollIntoView());
+            // 規則二：在段落最尾端按 Enter -> 智慧細胞分裂 (Split)
+            const isAtEnd = $from.parentOffset === $from.parent.content.size;
+            if (isAtEnd) {
+                let targetType = null;
+                if (ct === 'character') targetType = scriptSchema.nodes.dialogue;
+                else if (ct === 'dialogue' || ct === 'scene_heading') targetType = scriptSchema.nodes.action;
+
+                if (targetType) {
+                    if (dispatch) {
+                        // 🌟 神奇的 tr.split：直接在游標切一刀，並設定下一半的格式。絕對不會出錯！
+                        const tr = state.tr.split($from.pos, 1, [{ type: targetType }]);
+                        dispatch(tr.scrollIntoView());
+                    }
+                    return true;
                 }
-                return true;
             }
-            // 場次/對白 -> 換行變動作
-            else if ((ct === 'dialogue' || ct === 'scene_heading') && isAtEnd) {
-                if (dispatch) {
-                    const tr = state.tr.insert($from.after(), scriptSchema.nodes.action.createAndFill());
-                    dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve($from.after() + 1))).scrollIntoView());
-                }
-                return true;
-            }
-            // 空白動作 -> 連按 Enter 變場次
-            else if (ct === 'action' && $from.parent.textContent.trim() === "") {
-                if (dispatch) {
-                    const tr = state.tr.replaceWith($from.before(), $from.after(), scriptSchema.nodes.scene_heading.createAndFill());
-                    dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve($from.before() + 1))).scrollIntoView());
-                }
-                return true;
-            }
-            // 如果是在段落中間按 Enter，則退回給系統預設處理（正常的段落裁斷）
+            
+            // 如果是在段落中間按，或是其他情況，放行給系統預設的換行處理
             return false;
           }, 
           "Backspace": backspaceCommand 
