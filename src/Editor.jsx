@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react'
+import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef, useMemo } from 'react'
 import { EditorState, TextSelection, Plugin, PluginKey } from 'prosemirror-state'
 import { EditorView } from 'prosemirror-view'
 import { keymap } from 'prosemirror-keymap'
@@ -184,12 +184,12 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
         const saved = localStorage.getItem('script-studio-data')
         if (saved) savedDoc = Node.fromJSON(scriptSchema, JSON.parse(saved));
     } catch (e) {
-        console.warn("載入歷史紀錄失敗，將開啟新文件。")
+        console.warn("歷史紀錄載入失敗，將開啟新文件。")
     }
 
     if (!savedDoc) {
         const div = document.createElement('div')
-        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">現在即使發布到網站上，編輯器也不會卡死了！</p>`
+        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">現在新增段落與換行絕對不會當機了！試試在標題按 Enter 吧。</p>`
         savedDoc = DOMParser.fromSchema(scriptSchema).parse(div)
     }
 
@@ -223,7 +223,6 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
 
               if (event.key === 'Enter' || event.key === 'Tab' || event.key === ' ') { 
                   let txtToInsert = ''
-                  
                   if (event.key === ' ') {
                       if (!pmMenuRef.current.query.trim()) {
                           setMenuData(p => ({ ...p, active: false }));
@@ -231,8 +230,7 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
                           return false; 
                       }
                       txtToInsert = pmMenuRef.current.query;
-                  } 
-                  else {
+                  } else {
                       const sel = currentOptions[Math.max(0, safeIndex)]
                       if (!sel) {
                           setMenuData(p => ({ ...p, active: false }));
@@ -243,7 +241,6 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
                   }
 
                   const finalTxt = formatTag(txtToInsert, pmMenuRef.current.menuType);
-
                   event.preventDefault();
                   view.dispatch(view.state.tr.replaceWith(pmMenuRef.current.from, pmMenuRef.current.to, view.state.schema.text(finalTxt)));
                   
@@ -312,28 +309,60 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
           }
         }),
         buildInputRules(),
-        keymap({ "Tab": (s, d) => {
-            const { $from } = s.selection; let nt;
+        keymap({ 
+          "Tab": (state, dispatch) => {
+            const { $from } = state.selection; let nt;
             const ct = $from.parent.type.name;
             if (ct === 'action') nt = scriptSchema.nodes.character;
             else if (ct === 'character') nt = scriptSchema.nodes.dialogue;
             else if (ct === 'dialogue') nt = scriptSchema.nodes.scene_heading;
             else nt = scriptSchema.nodes.action;
-            if (d) setBlockType(nt)(s, d); return true;
-        }, "Enter": (s, d) => {
-            const { $from } = s.selection; const ct = $from.parent.type.name;
-            if (ct === 'character' && d) d(s.tr.insert($from.pos, scriptSchema.nodes.dialogue.createAndFill()).setSelection(TextSelection.near(s.tr.doc.resolve($from.pos + 1))).scrollIntoView());
-            else if ((ct === 'dialogue' || ct === 'scene_heading') && d) d(s.tr.insert($from.pos, scriptSchema.nodes.action.createAndFill()).setSelection(TextSelection.near(s.tr.doc.resolve($from.pos + 1))).scrollIntoView());
-            else if (ct === 'action' && $from.parent.textContent.trim() === "" && d) d(s.tr.replaceWith($from.before(), $from.after(), scriptSchema.nodes.scene_heading.createAndFill()).setSelection(TextSelection.near(s.tr.doc.resolve($from.before() + 1))).scrollIntoView());
-            else return false; return true;
-        }, "Backspace": backspaceCommand }),
+            if (dispatch) setBlockType(nt)(state, dispatch); return true;
+          }, 
+          "Enter": (state, dispatch) => {
+            const { $from, empty } = state.selection; 
+            if (!empty) return false;
+            
+            const ct = $from.parent.type.name;
+            // 🌟 核心修復：確保我們是在段落的最尾端按 Enter，才執行格式轉換
+            const isAtEnd = $from.parentOffset === $from.parent.content.size;
+
+            // 角色 -> 換行變對白
+            if (ct === 'character' && isAtEnd) {
+                if (dispatch) {
+                    // 使用 $from.after() 確保新段落建立在當前段落的正下方，而不是塞在文字中間！
+                    const tr = state.tr.insert($from.after(), scriptSchema.nodes.dialogue.createAndFill());
+                    dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve($from.after() + 1))).scrollIntoView());
+                }
+                return true;
+            }
+            // 場次/對白 -> 換行變動作
+            else if ((ct === 'dialogue' || ct === 'scene_heading') && isAtEnd) {
+                if (dispatch) {
+                    const tr = state.tr.insert($from.after(), scriptSchema.nodes.action.createAndFill());
+                    dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve($from.after() + 1))).scrollIntoView());
+                }
+                return true;
+            }
+            // 空白動作 -> 連按 Enter 變場次
+            else if (ct === 'action' && $from.parent.textContent.trim() === "") {
+                if (dispatch) {
+                    const tr = state.tr.replaceWith($from.before(), $from.after(), scriptSchema.nodes.scene_heading.createAndFill());
+                    dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve($from.before() + 1))).scrollIntoView());
+                }
+                return true;
+            }
+            // 如果是在段落中間按 Enter，則退回給系統預設處理（正常的段落裁斷）
+            return false;
+          }, 
+          "Backspace": backspaceCommand 
+        }),
         keymap(baseKeymap) 
       ] 
     })
     
     viewRef.current = new EditorView(editorDOMRef.current, {
       state, dispatchTransaction(tr) {
-        // 🌟 防護罩：捕獲任何在生產環境中可能發生的意外錯誤
         try {
             const next = viewRef.current.state.apply(tr); 
             viewRef.current.updateState(next)
