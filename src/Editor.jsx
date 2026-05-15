@@ -187,7 +187,7 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
 
     if (!savedDoc) {
         const div = document.createElement('div')
-        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">這次拔除了原生的換行引擎！你可以試著在最後一行按 Enter，保證絕對不會再卡死了！</p>`
+        div.innerHTML = `<h3 class="scene-heading">S1. 內. 工作室 - 日</h3><p class="action">這次徹底修復了游標脫節的問題，請盡情地按 Enter 測試吧！</p>`
         savedDoc = DOMParser.fromSchema(scriptSchema).parse(div)
     }
 
@@ -321,12 +321,12 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
             return true;
           }, 
           
-          // 🔥 徹底接管 Enter：不再信任原生的 splitBlock
+          // 🔥 無敵 Enter 處理器
           "Enter": (state, dispatch) => {
             let tr = state.tr;
             const { $from, $to } = state.selection;
 
-            // 1. 如果有反白選取文字，先把它刪掉
+            // 1. 如果有選取文字，先刪除
             if ($from.pos !== $to.pos) {
                 tr = tr.delete($from.pos, $to.pos);
             }
@@ -349,19 +349,19 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
             else if (ct === 'dialogue' || ct === 'scene_heading') targetType = scriptSchema.nodes.action;
 
             if (dispatch) {
-                // 🔥 暴力破解點：如果你是在這句話的最尾端按 Enter
-                if ($pos.parentOffset === $pos.parent.content.size) {
-                    // 直接計算下一行的絕對位置 (不再依賴分裂引擎)
-                    const insertPos = $pos.after();
-                    // 強制在那邊生出一個新段落
-                    tr = tr.insert(insertPos, targetType.create());
-                    // 強制把游標移到那個新段落裡面
-                    tr = tr.setSelection(TextSelection.near(tr.doc.resolve(insertPos + 1)));
-                } else {
-                    // 如果是在文字中間按 Enter，才正常把它切成兩半
+                try {
+                    // 🔥 使用原生 split 切割段落
                     tr = tr.split(pos, 1, [{ type: targetType }]);
+                    
+                    if (tr.docChanged) {
+                        // 🔥 核心修正：強制把游標拉進新產生的段落內 (pos + 2)
+                        // 使用 .near 來保證就算計算有微小誤差，也不會報錯死機
+                        tr = tr.setSelection(TextSelection.near(tr.doc.resolve(pos + 2)));
+                    }
+                    dispatch(tr.scrollIntoView());
+                } catch (e) {
+                    console.error("Enter 換行防護機制觸發", e);
                 }
-                dispatch(tr.scrollIntoView());
             }
             return true;
           }, 
@@ -373,19 +373,13 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
     
     viewRef.current = new EditorView(editorDOMRef.current, {
       state, dispatchTransaction(tr) {
-        // 把 Try-Catch 縮小範圍，確保編輯器狀態絕對會更新，不會凍結！
-        let next;
         try {
-            next = viewRef.current.state.apply(tr);
-        } catch(e) {
-            console.error("狀態更新失敗，但已安全回復", e);
-            return; 
-        }
-        
-        viewRef.current.updateState(next);
-        
-        if (tr.docChanged) {
-          try {
+            // 套用變更
+            const next = viewRef.current.state.apply(tr); 
+            viewRef.current.updateState(next)
+            
+            // 背景同步資料
+            if (tr.docChanged) {
               const h = []; const locs = new Set(), times = new Set(), tags = new Set()
               let i = 1; next.doc.descendants((n, p) => { 
                 if (n.type.name === 'scene_heading') { 
@@ -407,9 +401,11 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
               })
               onSceneContextChange({ headings: h, ftext: ftext.trim(), pages: Math.max(1, Math.ceil(editorDOMRef.current.clientHeight / 1131)) })
               localStorage.setItem('script-studio-data', JSON.stringify(next.doc.toJSON()))
-          } catch(e) {
-              console.error("背景處理資料時發生問題", e);
-          }
+            }
+        } catch (e) {
+            console.error("已啟動系統防護，攔截致命錯誤：", e);
+            // 🔥 反彈裝甲：如果發生任何錯誤，強迫編輯器回朔到上一步的安全狀態，拒絕當機！
+            viewRef.current.updateState(viewRef.current.state);
         }
       }
     })
@@ -440,7 +436,7 @@ const Editor = forwardRef(({ onSceneContextChange }, ref) => {
                  pmMenuRef.current.active = false
                  viewRef.current.focus()
              }}>
-                <span className={`tag-badge type-${opt.type}`}>{opt.label}</span><span className="tag-text">{opt.text}</span>
+                 <span className={`tag-badge type-${opt.type}`}>{opt.label}</span><span className="tag-text">{opt.text}</span>
              </div>
           ))}
         </div>
